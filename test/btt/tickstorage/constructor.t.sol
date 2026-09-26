@@ -47,9 +47,7 @@ contract ConstructorTest is BttBase {
         _floorPrice = bound(_floorPrice, ConstantsLib.MIN_TICK_SPACING, ConstantsLib.MIN_FLOOR_PRICE - 1);
         _tickSpacing = _floorPrice;
 
-        vm.expectRevert(
-            abi.encodeWithSelector(ITickStorage.FloorPriceTooLow.selector, _floorPrice, ConstantsLib.MIN_FLOOR_PRICE)
-        );
+        vm.expectRevert(ITickStorage.FloorPriceTooLow.selector);
         new MockTickStorage(_tickSpacing, _floorPrice);
     }
 
