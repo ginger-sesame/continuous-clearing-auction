@@ -91,6 +91,39 @@ interface IContinuousClearingAuction is
     /// @notice Error thrown when force iteration is attempted after this block's checkpoint already exists
     error CheckpointAlreadyExistsForBlock();
 
+    /// @notice Recycling is unsupported for auctions with bid validation hooks
+    error RecyclingWithValidationHook();
+    /// @notice Only bids strictly below the checkpointed clearing price may recycle
+    error BidNotStrictlyOutbid();
+    /// @notice The requested amount exceeds the bid's unspent, unrecycled balance
+    error InsufficientUnspentBalance();
+
+    /// @notice Currency moved from an outbid bid into a fresh bid without an external deposit
+    event BidRecycled(uint256 indexed oldBidId, uint256 indexed newBidId, uint128 amount);
+
+    /// @notice Total currency recycled out of a bid, deducted from both success and failure refunds
+    function recycledAmount(uint256 bidId) external view returns (uint256);
+
+    /// @notice Reuse strictly outbid, unspent currency in a fresh bid owned by the same caller
+    /// @dev Nonpayable; credit stays in this auction. Unsupported with validation hooks. The old
+    ///      bid retains its historical fills and must still be exited. The new price must exceed
+    ///      current clearing. Hints use the same semantics as exitPartiallyFilledBid, with a nonzero outbidBlock.
+    /// @param bidId The unexited bid owned by msg.sender
+    /// @param amount Whole currency units to recycle, rounded down from the available Q96 balance
+    /// @param newMaxPriceQ96 Maximum Q96 price for the fresh bid
+    /// @param prevTickPriceQ96 Initialized tick preceding the new maximum price
+    /// @param lastFullyFilledCheckpointBlock Last checkpoint strictly below the old bid's maximum price
+    /// @param outbidBlock First checkpoint strictly above the old bid's maximum price
+    /// @return newBidId The fresh bid starting at the current checkpoint
+    function recycleOutbidBid(
+        uint256 bidId,
+        uint128 amount,
+        uint256 newMaxPriceQ96,
+        uint256 prevTickPriceQ96,
+        uint64 lastFullyFilledCheckpointBlock,
+        uint64 outbidBlock
+    ) external returns (uint256 newBidId);
+
     /// @notice Emitted when the tokens are received
     /// @param totalSupply The total supply of tokens received
     event TokensReceived(uint128 totalSupply);

@@ -29,6 +29,11 @@ contract AuctionFactoryTest is AuctionBaseTest {
         factory = new ContinuousClearingAuctionFactory(address(0));
     }
 
+    function test_factoryAndAuctionFitRuntimeSizeLimit() public view {
+        assertLe(address(factory).code.length, 24_576, 'factory exceeds EIP-170');
+        assertLe(address(auction).code.length, 24_576, 'auction exceeds EIP-170');
+    }
+
     function test_protocolFeeController_isSetAtConstruction(address protocolFeeController, bytes32 salt, address sender)
         public
     {

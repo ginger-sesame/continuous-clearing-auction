@@ -29,7 +29,8 @@ remappings = [
   "btt=test/btt/",
 ]
 
-additional_compiler_profiles = [{ name = "via_ir", optimizer_runs = 11111, via_ir = true }]
+# The factory embeds auction creation code; favor code size to stay within EIP-170.
+additional_compiler_profiles = [{ name = "via_ir", optimizer_runs = 1000, via_ir = true }]
 
 compilation_restrictions = [
   { paths = "src/ContinuousClearingAuctionFactory.sol", via_ir = true }

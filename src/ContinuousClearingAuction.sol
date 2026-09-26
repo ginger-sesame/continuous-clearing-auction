@@ -60,6 +60,12 @@ contract ContinuousClearingAuction is
     /// @notice An optional hook to be called before a bid is registered
     IValidationHook internal immutable VALIDATION_HOOK;
 
+    /// @inheritdoc IContinuousClearingAuction
+    /// @dev Each fresh bid's principal has an equal debit on its parent. Thus the sum of
+    ///      (principal - recycledAmount) over a bid family equals its external deposit,
+    ///      independently of recycling depth or refund order. Original Q96 amounts stay intact.
+    mapping(uint256 bidId => uint256 amount) public recycledAmount;
+
     constructor(
         address _token,
         uint128 _totalSupply,
@@ -405,6 +411,8 @@ contract ContinuousClearingAuction is
         // In edge cases where a bid spends all of its currency across fully filled and partially filled checkpoints,
         // the sum of currencySpent can be rounded up to one wei more than the bid amount. We clamp the refund to the bid amount.
         uint256 refund = FixedPointMathLib.saturatingSub(bidAmountQ96, _currencySpentQ96) >> FixedPoint96.RESOLUTION;
+        // Recycled credit is now owned by fresh bids, including when all fills are voided on failure.
+        refund -= recycledAmount[_bidId];
 
         $bid.tokensFilled = _tokensFilled;
         $bid.exitedBlock = uint64(_getBlockNumberish());
@@ -492,6 +500,42 @@ contract ContinuousClearingAuction is
     }
 
     /// @inheritdoc IContinuousClearingAuction
+    function recycleOutbidBid(
+        uint256 _bidId,
+        uint128 _amount,
+        uint256 _newMaxPriceQ96,
+        uint256 _prevTickPriceQ96,
+        uint64 _lastFullyFilledCheckpointBlock,
+        uint64 _outbidBlock
+    ) external onlyActiveAuction nonReentrant returns (uint256 newBidId) {
+        if (_getBlockNumberish() >= END_BLOCK) revert AuctionIsOver();
+        if (address(VALIDATION_HOOK) != address(0)) revert RecyclingWithValidationHook();
+        if (_amount == 0) revert BidAmountTooSmall();
+
+        Checkpoint memory currentCheckpoint = checkpoint();
+        Bid memory bid = _getBid(_bidId);
+        if (msg.sender != bid.owner) revert NotAuthorized(bid.owner, msg.sender);
+        if (bid.exitedBlock != 0) revert BidAlreadyExited();
+        if (bid.maxPrice >= currentCheckpoint.clearingPrice) revert BidNotStrictlyOutbid();
+        if (_outbidBlock == 0) revert InvalidOutbidBlockCheckpointHint();
+
+        (, uint256 spentQ96) =
+            _accountPartiallyFilledBid(bid, _lastFullyFilledCheckpointBlock, _outbidBlock, currentCheckpoint);
+        // Round available credit down exactly as for an ordinary successful exit.
+        uint256 unspent = FixedPointMathLib.saturatingSub(bid.amountQ96, spentQ96) >> FixedPoint96.RESOLUTION;
+        uint256 alreadyRecycled = recycledAmount[_bidId];
+        if (_amount > unspent - alreadyRecycled) revert InsufficientUnspentBalance();
+        recycledAmount[_bidId] = alreadyRecycled + _amount;
+
+        // The old bid and its tick demand stay intact for historical fill accounting. Its tick
+        // is strictly below clearing and can never become active again. No currency is transferred.
+        // Hooks were rejected above. Pass empty calldata and reuse normal bid validation and
+        // registration; checkpointing again in the same block returns the existing checkpoint.
+        newBidId = _submitBid(_newMaxPriceQ96, _amount, bid.owner, _prevTickPriceQ96, msg.data[:0]);
+        emit BidRecycled(_bidId, newBidId, _amount);
+    }
+
+    /// @inheritdoc IContinuousClearingAuction
     function exitBid(uint256 _bidId) external onlyAfterAuctionIsOver {
         Bid memory bid = _getBid(_bidId);
         if (bid.exitedBlock != 0) revert BidAlreadyExited();
@@ -531,6 +575,19 @@ contract ContinuousClearingAuction is
             revert CannotPartiallyExitBidBeforeGraduation();
         }
 
+        (uint256 tokensFilled, uint256 currencySpentQ96) =
+            _accountPartiallyFilledBid(bid, _lastFullyFilledCheckpointBlock, _outbidBlock, currentBlockCheckpoint);
+        _processExit(_bidId, tokensFilled, currencySpentQ96);
+    }
+
+    /// @dev Shared hint validation and historical accounting for partial exits and recycling.
+    function _accountPartiallyFilledBid(
+        Bid memory bid,
+        uint64 _lastFullyFilledCheckpointBlock,
+        uint64 _outbidBlock,
+        Checkpoint memory currentBlockCheckpoint
+    ) internal view returns (uint256 tokensFilled, uint256 currencySpentQ96) {
+        uint256 currentBlockNumberIsh = _getBlockNumberish();
         uint256 bidMaxPrice = bid.maxPrice;
         uint64 bidStartBlock = bid.startBlock;
 
@@ -549,7 +606,7 @@ contract ContinuousClearingAuction is
         // Calculate the tokens and currency spent for the fully filled checkpoints
         // If the bid is outbid in the same block it is submitted in, these two checkpoints will be identical.
         // The extra gas to check for this isn't worth it since the returned values will be 0.
-        (uint256 tokensFilled, uint256 currencySpentQ96) = CheckpointAccountingLib.accountFullyFilledCheckpoints(
+        (tokensFilled, currencySpentQ96) = CheckpointAccountingLib.accountFullyFilledCheckpoints(
             lastFullyFilledCheckpoint, _getCheckpoint(bidStartBlock), bid
         );
 
@@ -596,8 +653,6 @@ contract ContinuousClearingAuction is
             tokensFilled += partialTokensFilled;
             currencySpentQ96 += partialCurrencySpentQ96;
         }
-
-        _processExit(_bidId, tokensFilled, currencySpentQ96);
     }
 
     /// @inheritdoc IContinuousClearingAuction
